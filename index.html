@@ -1,0 +1,266 @@
+
+<!DOCTYPE html>
+<html lang="no">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sleep AI – BitBot Pro</title>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest/dist/teachablemachine-image.min.js"></script>
+
+<style>
+body {
+    background: #0b1020;
+    color: white;
+    font-family: Arial, sans-serif;
+    text-align: center;
+    padding: 20px;
+}
+.card {
+    background: #161e32;
+    padding: 20px;
+    border-radius: 18px;
+    max-width: 650px;
+    margin: 20px auto;
+}
+button {
+    padding: 14px 20px;
+    border: none;
+    border-radius: 10px;
+    background: #4b8cff;
+    color: white;
+    font-size: 16px;
+    margin: 6px;
+    cursor: pointer;
+}
+video, canvas {
+    border-radius: 14px;
+    width: 100%;
+    max-width: 400px;
+}
+.bar {
+    height: 18px;
+    background: #29344c;
+    border-radius: 10px;
+    overflow: hidden;
+}
+.fill {
+    height: 100%;
+    width: 0%;
+    background: #4b8cff;
+    transition: width .2s;
+}
+.status {
+    font-size: 30px;
+    font-weight: bold;
+    margin: 20px;
+}
+.small {
+    color: #aab7d0;
+}
+</style>
+</head>
+
+<body>
+
+<h1>🤖 Sleep AI</h1>
+<p class="small">Webcam AI + BitBot Pro</p>
+
+<div class="card">
+    <div id="status" class="status">Ikke startet</div>
+    <div id="confidence">0%</div>
+    <div class="bar">
+        <div id="fill" class="fill"></div>
+    </div>
+
+    <div id="camera"></div>
+
+    <button onclick="startAI()">Start kamera</button>
+    <button onclick="connectBitBot()">Koble til BitBot</button>
+    <button onclick="stopSystem()">STOPP</button>
+
+    <p id="connection">BitBot ikke tilkoblet</p>
+</div>
+
+<div class="card">
+    <h2>AI-resultater</h2>
+    <div id="results"></div>
+</div>
+
+<script>
+const MODEL_URL =
+"https://teachablemachine.withgoogle.com/models/xBVx04i-c/";
+
+let model;
+let webcam;
+let running = false;
+
+let port;
+let writer;
+
+let currentState = "";
+let sleepCount = 0;
+let awakeCount = 0;
+
+const THRESHOLD = 0.80;
+const REQUIRED = 5;
+
+async function startAI() {
+    if (running) return;
+
+    document.getElementById("status").innerText =
+        "Laster modell...";
+
+    try {
+        model = await tmImage.load(
+            MODEL_URL + "model.json",
+            MODEL_URL + "metadata.json"
+        );
+
+        webcam = new tmImage.Webcam(320, 320, true);
+        await webcam.setup();
+        await webcam.play();
+
+        document.getElementById("camera").innerHTML = "";
+        document.getElementById("camera").appendChild(webcam.canvas);
+
+        running = true;
+        loop();
+
+        document.getElementById("status").innerText =
+            "Kamera startet";
+
+    } catch (error) {
+        document.getElementById("status").innerText =
+            "Feil ved oppstart";
+
+        console.error(error);
+    }
+}
+
+async function connectBitBot() {
+    try {
+        if (!("serial" in navigator)) {
+            alert("Bruk Chrome eller Edge på PC.");
+            return;
+        }
+
+        port = await navigator.serial.requestPort();
+
+        await port.open({ baudRate: 115200 });
+
+        writer = port.writable.getWriter();
+
+        document.getElementById("connection").innerText =
+            "BitBot tilkoblet";
+
+        await sendCommand("STOPP");
+
+    } catch (error) {
+        console.error(error);
+
+        document.getElementById("connection").innerText =
+            "Tilkobling feilet";
+    }
+}
+
+async function sendCommand(command) {
+    if (!writer) return;
+
+    try {
+        const data = new TextEncoder().encode(command + "\n");
+        await writer.write(data);
+    } catch (error) {
+        console.error("Sendefeil:", error);
+    }
+}
+
+async function loop() {
+    if (!running) return;
+
+    webcam.update();
+
+    const prediction = await model.predict(webcam.canvas);
+
+    let sleeping = prediction.find(p =>
+        p.className.toLowerCase().trim() === "sover"
+    );
+
+    let awake = prediction.find(p =>
+        p.className.toLowerCase().trim() === "sover ikke"
+    );
+
+    const sleepProbability = sleeping
+        ? sleeping.probability
+        : 0;
+
+    const awakeProbability = awake
+        ? awake.probability
+        : 0;
+
+    document.getElementById("confidence").innerText =
+        Math.round(sleepProbability * 100) + "% Sover";
+
+    document.getElementById("fill").style.width =
+        (sleepProbability * 100) + "%";
+
+    document.getElementById("results").innerHTML =
+        prediction.map(p => `
+            <p>${p.className}: ${Math.round(p.probability * 100)}%</p>
+        `).join("");
+
+    if (sleepProbability >= THRESHOLD) {
+        sleepCount++;
+        awakeCount = 0;
+    } else if (awakeProbability >= THRESHOLD) {
+        awakeCount++;
+        sleepCount = 0;
+    } else {
+        sleepCount = 0;
+        awakeCount = 0;
+    }
+
+    if (sleepCount >= REQUIRED && currentState !== "SOVER") {
+        currentState = "SOVER";
+
+        document.getElementById("status").innerText =
+            "💤 SOVER";
+
+        await sendCommand("SOVER");
+    }
+
+    if (awakeCount >= REQUIRED && currentState !== "VAKEN") {
+        currentState = "VAKEN";
+
+        document.getElementById("status").innerText =
+            "☀️ VÅKEN";
+
+        await sendCommand("VAKEN");
+    }
+
+    if (running) {
+        requestAnimationFrame(loop);
+    }
+}
+
+async function stopSystem() {
+    running = false;
+    sleepCount = 0;
+    awakeCount = 0;
+    currentState = "";
+
+    if (webcam) {
+        webcam.stop();
+    }
+
+    document.getElementById("camera").innerHTML = "";
+    document.getElementById("status").innerText = "STOPPET";
+    document.getElementById("fill").style.width = "0%";
+
+    await sendCommand("STOPP");
+}
+
+</script>
+</body>
+</html>
